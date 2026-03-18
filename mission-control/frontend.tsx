@@ -7,9 +7,10 @@ import { VoiceModal } from './components/VoiceModal';
 import { TerminalPanel } from './components/TerminalPanel';
 
 const WS_URL = 'ws://localhost:3459/ws';
+const DEDUP_INTERVAL = 15000; // 15 seconds auto-dedup
 
 export default function App() {
-  const { voiceModalOpen, setVoiceModalOpen, setPanes, setSessions, addClick } = usePulseStore();
+  const { voiceModalOpen, setVoiceModalOpen, setPanes, setSessions, setAgents, agents } = usePulseStore();
   const [wsConnected, setWsConnected] = useState(false);
   const [showTerminal, setShowTerminal] = useState(false);
   const [ws, setWs] = useState<WebSocket | null>(null);
@@ -32,19 +33,18 @@ export default function App() {
         switch (data.type) {
           case 'panes':
             setPanes(data.data);
+            dedupAgents(data.data);
+            break;
+          case 'sessions':
+            setSessions(data.data);
             break;
           case 'connected':
-            // Request initial data
             socket.send(JSON.stringify({ type: 'get_panes' }));
             break;
           case 'agents_spawned':
           case 'pane_killed':
           case 'text_sent':
-            // Refresh panes
             socket.send(JSON.stringify({ type: 'get_panes' }));
-            break;
-          case 'claude_prompt':
-            console.log('🤖 Claude prompt sent:', data.data.prompt);
             break;
         }
       } catch (e) {
@@ -65,26 +65,61 @@ export default function App() {
     return () => socket.close();
   }, []);
 
-  // Periodic refresh
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetch('http://localhost:3459/wezterm/panes')
-        .then(res => res.json())
-        .then(panes => {
-          if (Array.isArray(panes)) setPanes(panes);
-        })
-        .catch(() => {});
+  // Auto-dedup: merge panes with agents
+  const dedupAgents = useCallback((panes: any[]) => {
+    const updatedAgents = agents.map(agent => {
+      const matchingPane = panes.find((p: any) =>
+        p.title?.toLowerCase().includes(agent.id) ||
+        p.cwd?.toLowerCase().includes(agent.id)
+      );
 
-      fetch('http://localhost:3459/claude/sessions')
-        .then(res => res.json())
-        .then(sessions => {
-          if (Array.isArray(sessions)) setSessions(sessions);
-        })
-        .catch(() => {});
-    }, 15000);
+      if (matchingPane) {
+        return {
+          ...agent,
+          status: 'active' as const,
+          paneId: matchingPane.pane_id,
+          cwd: matchingPane.cwd,
+          branch: matchingPane.cwd?.split('/').pop()
+        };
+      }
+      return agent;
+    });
+
+    setAgents(updatedAgents);
+  }, [agents, setAgents]);
+
+  // Auto-dedup interval (every 15 seconds)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('http://localhost:3459/wezterm/panes');
+        const panes = await res.json();
+        if (Array.isArray(panes)) {
+          setPanes(panes);
+          dedupAgents(panes);
+        }
+      } catch {
+        // Silently fail - WezTerm might not be running
+      }
+    }, DEDUP_INTERVAL);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [dedupAgents, setPanes]);
+
+  // Periodic session refresh
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('http://localhost:3459/claude/sessions');
+        const sessions = await res.json();
+        if (Array.isArray(sessions)) setSessions(sessions);
+      } catch {
+        // Silently fail
+      }
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [setSessions]);
 
   return (
     <div className="min-h-screen bg-[#0a0a0f]">
@@ -121,7 +156,12 @@ export default function App() {
         🎤
       </button>
 
-      {voiceModalOpen && <VoiceModal />}
+      {voiceModalOpen && (
+        <>
+          <div className="voice-overlay" onClick={() => setVoiceModalOpen(false)} />
+          <VoiceModal />
+        </>
+      )}
     </div>
   );
 }

@@ -132,17 +132,29 @@ body {
   border-left: 3px solid var(--accent-green);
 }
 
+.voice-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  z-index: 40;
+}
+
 .voice-modal {
   position: fixed;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(26, 26, 36, 0.95);
-  backdrop-filter: blur(20px);
-  border-radius: 16px;
-  padding: 24px;
-  min-width: 300px;
+  background: rgba(26, 26, 36, 0.85);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-radius: 20px;
+  padding: 28px;
+  min-width: 340px;
   text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  z-index: 50;
 }
 
 .voice-btn {

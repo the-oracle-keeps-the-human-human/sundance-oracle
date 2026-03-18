@@ -261,6 +261,36 @@ const server = Bun.serve({
       return Response.json(claudePanes);
     }
 
+    // POST /mqtt/send/:agent — Send message to specific agent via MQTT
+    if (url.pathname.startsWith('/mqtt/send/') && req.method === 'POST') {
+      const agentId = url.pathname.split('/mqtt/send/')[1];
+      const body = await req.json() as { message: string };
+
+      // In real implementation, this would publish to MQTT broker
+      // For now, broadcast via WebSocket
+      broadcast('mqtt_message', {
+        target: agentId,
+        message: body.message,
+        timestamp: Date.now()
+      });
+
+      console.log(`📤 MQTT send to ${agentId}: ${body.message}`);
+      return Response.json({ success: true, target: agentId, sent: true });
+    }
+
+    // POST /mqtt/broadcast — Broadcast message to all agents
+    if (url.pathname === '/mqtt/broadcast' && req.method === 'POST') {
+      const body = await req.json() as { message: string };
+
+      broadcast('mqtt_broadcast', {
+        message: body.message,
+        timestamp: Date.now()
+      });
+
+      console.log(`📢 MQTT broadcast: ${body.message}`);
+      return Response.json({ success: true, broadcast: true });
+    }
+
     // Health check
     if (url.pathname === '/health') {
       return Response.json({
