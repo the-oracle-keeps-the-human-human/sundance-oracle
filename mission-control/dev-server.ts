@@ -92,6 +92,18 @@ async function sendText(paneId: number, text: string, env: Record<string, string
   await Bun.$`wezterm cli send-text --pane-id ${paneId} ${text}`.env(env);
 }
 
+// Capture pane content (simulated - WezTerm doesn't have direct capture)
+// In real implementation, use tmux capture-pane or screen scraping
+async function capturePane(paneId: number, env: Record<string, string>): Promise<string> {
+  try {
+    // Try tmux capture-pane if available
+    const result = await Bun.$`tmux capture-pane -t %${paneId} -p -S -50 2>/dev/null`.env(env).text();
+    return result || '';
+  } catch {
+    return '';
+  }
+}
+
 // ============ WebSocket Broadcast ============
 
 function broadcast(type: string, data: any) {
@@ -261,6 +273,45 @@ const server = Bun.serve({
       return Response.json(claudePanes);
     }
 
+    // GET /claude/output/:session_id — Get Claude session output
+    if (url.pathname.startsWith('/claude/output/') && req.method === 'GET') {
+      const sessionId = url.pathname.split('/claude/output/')[1];
+      const sock = await findWeztermSocket();
+
+      if (!sock) {
+        return Response.json({ output: '' });
+      }
+
+      const env = weztermEnv(sock);
+      const panes = await listPanes(env);
+
+      // Find pane by session ID or title
+      const pane = panes.find(p =>
+        p.pane_id.toString() === sessionId ||
+        p.title.toLowerCase().includes(sessionId)
+      );
+
+      if (!pane) {
+        return Response.json({ output: '' });
+      }
+
+      const output = await capturePane(pane.pane_id, env);
+      return Response.json({ output, pane_id: pane.pane_id });
+    }
+
+    // GET /wezterm/capture/:pane_id — Capture pane output
+    if (url.pathname.startsWith('/wezterm/capture/') && req.method === 'GET') {
+      const paneId = parseInt(url.pathname.split('/wezterm/capture/')[1]);
+      const sock = await findWeztermSocket();
+
+      if (!sock) {
+        return Response.json({ error: 'WezTerm not running' }, { status: 503 });
+      }
+
+      const output = await capturePane(paneId, weztermEnv(sock));
+      return Response.json({ pane_id: paneId, output });
+    }
+
     // POST /mqtt/send/:agent — Send message to specific agent via MQTT
     if (url.pathname.startsWith('/mqtt/send/') && req.method === 'POST') {
       const agentId = url.pathname.split('/mqtt/send/')[1];
@@ -341,8 +392,11 @@ const server = Bun.serve({
 
 console.log(`🔮 Oracle Pulse Dev Server running on http://localhost:${PORT}`);
 console.log(`   WebSocket: ws://localhost:${PORT}/ws`);
-console.log(`   GET  /wezterm/panes        — List all panes`);
+console.log(`   GET  /wezterm/panes         — List all panes`);
 console.log(`   POST /wezterm/split-profile — Open agents`);
-console.log(`   POST /wezterm/send-text    — Send text to pane`);
-console.log(`   POST /claude/prompt        — Send prompt to Claude`);
-console.log(`   GET  /claude/sessions      — List Claude sessions`);
+console.log(`   POST /wezterm/send-text     — Send text to pane`);
+console.log(`   GET  /wezterm/capture/:id   — Capture pane output`);
+console.log(`   POST /claude/prompt         — Send prompt to Claude`);
+console.log(`   GET  /claude/sessions       — List Claude sessions`);
+console.log(`   GET  /claude/output/:id     — Get Claude output`);
+console.log(`   POST /mqtt/broadcast        — Broadcast to all`);
