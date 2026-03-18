@@ -1,0 +1,33 @@
+# Environment
+.env
+.env.*
+*.env
+
+# Secrets
+credentials.json
+secrets.json
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Oracle internal
+ψ/active/
+ψ/memory/logs/
+ψ/learn/
+.awaken-state.json
