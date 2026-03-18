@@ -11,11 +11,10 @@ export interface Agent {
 }
 
 export interface Session {
-  id: string;
-  name: string;
-  repo: string;
-  branch: string;
-  status: 'running' | 'stopped';
+  pane_id: number;
+  cwd: string;
+  title: string;
+  status: 'active';
 }
 
 export interface Pane {

@@ -2,7 +2,7 @@
  * Oracle Pulse Dev Server
  * Port: 3459
  *
- * WezTerm API wrapper + WebSocket relay
+ * WezTerm API wrapper + WebSocket relay + Claude Code interaction
  */
 
 const PORT = 3459;
@@ -19,6 +19,17 @@ interface SplitProfileRequest {
   agents: string[];
   split: boolean;
 }
+
+interface ClaudeSession {
+  id: string;
+  cwd: string;
+  status: 'active' | 'idle';
+  lastActivity: Date;
+}
+
+// WebSocket clients
+const wsClients = new Set<WebSocket>();
+const claudeSessions = new Map<string, ClaudeSession>();
 
 // ============ WezTerm API ============
 
@@ -60,11 +71,7 @@ async function spawnTab(agent: string, paneId: number, env: Record<string, strin
 async function spawnSplit(agents: string[], sock: string): Promise<void> {
   if (agents.length < 2) return;
   const env = weztermEnv(sock);
-
-  // First agent in current pane
   await Bun.$`wezterm cli split-pane -- ${sshTmuxArgs(agents[0])}`.env(env);
-
-  // Second agent in split
   await Bun.$`wezterm cli split-pane -- ${sshTmuxArgs(agents[1])}`.env(env);
 }
 
@@ -81,7 +88,22 @@ async function listPanes(env: Record<string, string>): Promise<Pane[]> {
   }
 }
 
-// ============ HTTP Server ============
+async function sendText(paneId: number, text: string, env: Record<string, string>): Promise<void> {
+  await Bun.$`wezterm cli send-text --pane-id ${paneId} ${text}`.env(env);
+}
+
+// ============ WebSocket Broadcast ============
+
+function broadcast(type: string, data: any) {
+  const message = JSON.stringify({ type, data, timestamp: Date.now() });
+  for (const client of wsClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  }
+}
+
+// ============ HTTP Server with WebSocket ============
 
 const server = Bun.serve({
   port: PORT,
@@ -89,7 +111,7 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
-    // CORS
+    // CORS preflight
     if (req.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
@@ -98,6 +120,15 @@ const server = Bun.serve({
           'Access-Control-Allow-Headers': 'Content-Type',
         },
       });
+    }
+
+    // WebSocket upgrade
+    if (url.pathname === '/ws') {
+      const upgraded = server.upgrade(req);
+      if (!upgraded) {
+        return new Response('WebSocket upgrade failed', { status: 500 });
+      }
+      return undefined;
     }
 
     // GET /wezterm/panes
@@ -129,6 +160,7 @@ const server = Bun.serve({
         }
       }
 
+      broadcast('agents_spawned', { agents, split });
       return Response.json({ success: true, agents });
     }
 
@@ -145,6 +177,7 @@ const server = Bun.serve({
       }
 
       await killPane(paneId, weztermEnv(sock));
+      broadcast('pane_killed', { pane_id: paneId });
       return Response.json({ success: true, pane_id: paneId });
     }
 
@@ -162,19 +195,124 @@ const server = Bun.serve({
         await killPane(paneId, env);
       }
 
+      broadcast('panes_closed', { pane_ids: body.pane_ids });
       return Response.json({ success: true, closed: body.pane_ids.length });
+    }
+
+    // POST /wezterm/send-text — Send command to terminal
+    if (url.pathname === '/wezterm/send-text' && req.method === 'POST') {
+      const sock = await findWeztermSocket();
+      if (!sock) {
+        return Response.json({ error: 'WezTerm not running' }, { status: 503 });
+      }
+
+      const body = await req.json() as { pane_id: number; text: string; enter?: boolean };
+      const text = body.enter ? `${body.text}\n` : body.text;
+
+      await sendText(body.pane_id, text, weztermEnv(sock));
+      broadcast('text_sent', { pane_id: body.pane_id, text: body.text });
+      return Response.json({ success: true, pane_id: body.pane_id });
+    }
+
+    // POST /claude/prompt — Send prompt to Claude Code session
+    if (url.pathname === '/claude/prompt' && req.method === 'POST') {
+      const body = await req.json() as { session_id?: string; prompt: string };
+
+      // Find Claude Code pane (look for claude in title)
+      const sock = await findWeztermSocket();
+      if (!sock) {
+        return Response.json({ error: 'WezTerm not running' }, { status: 503 });
+      }
+
+      const panes = await listPanes(weztermEnv(sock));
+      const claudePane = panes.find(p =>
+        p.title.toLowerCase().includes('claude') ||
+        p.cwd.toLowerCase().includes('oracle')
+      );
+
+      if (!claudePane) {
+        return Response.json({ error: 'No Claude Code session found' }, { status: 404 });
+      }
+
+      // Send prompt with Enter
+      await sendText(claudePane.pane_id, `${body.prompt}\n`, weztermEnv(sock));
+      broadcast('claude_prompt', { pane_id: claudePane.pane_id, prompt: body.prompt });
+      return Response.json({ success: true, pane_id: claudePane.pane_id });
+    }
+
+    // GET /claude/sessions — List Claude Code sessions
+    if (url.pathname === '/claude/sessions' && req.method === 'GET') {
+      const sock = await findWeztermSocket();
+      if (!sock) {
+        return Response.json([]);
+      }
+
+      const panes = await listPanes(weztermEnv(sock));
+      const claudePanes = panes.filter(p =>
+        p.title.toLowerCase().includes('claude') ||
+        p.cwd.toLowerCase().includes('oracle')
+      ).map(p => ({
+        pane_id: p.pane_id,
+        cwd: p.cwd,
+        title: p.title,
+        status: 'active' as const
+      }));
+
+      return Response.json(claudePanes);
     }
 
     // Health check
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', timestamp: new Date().toISOString() });
+      return Response.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        ws_clients: wsClients.size
+      });
     }
 
     return Response.json({ error: 'Not found' }, { status: 404 });
   },
+
+  websocket: {
+    open(ws) {
+      wsClients.add(ws);
+      console.log(`📡 WebSocket client connected (${wsClients.size} total)`);
+      ws.send(JSON.stringify({ type: 'connected', data: { message: 'Welcome to Oracle Pulse' } }));
+    },
+    message(ws, message) {
+      try {
+        const data = JSON.parse(message.toString());
+        console.log('📩 WebSocket message:', data.type);
+
+        // Handle different message types
+        if (data.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+        }
+
+        if (data.type === 'get_panes') {
+          findWeztermSocket().then(sock => {
+            if (sock) {
+              listPanes(weztermEnv(sock)).then(panes => {
+                ws.send(JSON.stringify({ type: 'panes', data: panes }));
+              });
+            }
+          });
+        }
+      } catch (e) {
+        console.error('WebSocket parse error:', e);
+      }
+    },
+    close(ws) {
+      wsClients.delete(ws);
+      console.log(`📡 WebSocket client disconnected (${wsClients.size} total)`);
+    },
+  },
 });
 
 console.log(`🔮 Oracle Pulse Dev Server running on http://localhost:${PORT}`);
+console.log(`   WebSocket: ws://localhost:${PORT}/ws`);
 console.log(`   GET  /wezterm/panes        — List all panes`);
 console.log(`   POST /wezterm/split-profile — Open agents`);
-console.log(`   GET  /wezterm/kill-pane    — Kill a pane`);
+console.log(`   POST /wezterm/send-text    — Send text to pane`);
+console.log(`   POST /claude/prompt        — Send prompt to Claude`);
+console.log(`   GET  /claude/sessions      — List Claude sessions`);
